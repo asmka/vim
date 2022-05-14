@@ -2259,7 +2259,7 @@ leaving_window(win_T *win)
     // When leaving the window (or closing the window) was done from a
     // callback we need to break out of the Insert mode loop and restart Insert
     // mode when entering the window again.
-    if (State & INSERT)
+    if (State & MODE_INSERT)
     {
 	stop_insert_mode = TRUE;
 	if (win->w_buffer->b_prompt_insert == NUL)
@@ -2281,7 +2281,7 @@ entering_window(win_T *win)
 
     // When entering the prompt window restart Insert mode if we were in Insert
     // mode when we left it and not already in Insert mode.
-    if ((State & INSERT) == 0)
+    if ((State & MODE_INSERT) == 0)
 	restart_edit = win->w_buffer->b_prompt_insert;
 }
 #endif
@@ -6371,8 +6371,8 @@ scroll_to_fraction(win_T *wp, int prev_height)
     // - window height is sufficient to display the whole buffer and first line
     //   is visible.
     if (height > 0
-        && (!wp->w_p_scb || wp == curwin)
-        && (height < wp->w_buffer->b_ml.ml_line_count || wp->w_topline > 1))
+	   && (!wp->w_p_scb || wp == curwin)
+	   && (height < wp->w_buffer->b_ml.ml_line_count || wp->w_topline > 1))
     {
 	/*
 	 * Find a value for w_topline that shows the cursor at the same

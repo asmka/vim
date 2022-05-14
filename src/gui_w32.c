@@ -230,6 +230,10 @@ gui_mch_set_rendering_options(char_u *s)
 # define SPI_GETWHEELSCROLLCHARS	0x006C
 #endif
 
+#ifndef SPI_SETWHEELSCROLLCHARS
+# define SPI_SETWHEELSCROLLCHARS	0x006D
+#endif
+
 #ifdef PROTO
 /*
  * Define a few things for generating prototypes.  This is just to avoid
@@ -1952,7 +1956,8 @@ process_message(void)
 	    }
 	    // In modes where we are not typing, dead keys should behave
 	    // normally
-	    else if (!(get_real_state() & (INSERT | CMDLINE | SELECTMODE)))
+	    else if ((get_real_state()
+			    & (MODE_INSERT | MODE_CMDLINE | MODE_SELECT)) == 0)
 	    {
 		outputDeadKey_rePost(msg);
 		return;
@@ -3998,10 +4003,6 @@ static void get_dialog_font_metrics(void);
 
 static int dialog_default_button = -1;
 
-// Intellimouse support
-static int mouse_scroll_lines = 0;
-static int mouse_scroll_chars = 0;
-
 #ifdef FEAT_TOOLBAR
 static void initialise_toolbar(void);
 static void update_toolbar_size(void);
@@ -4117,35 +4118,44 @@ gui_mswin_get_menu_height(
 /*
  * Setup for the Intellimouse
  */
+    static long
+mouse_vertical_scroll_step(void)
+{
+    UINT val;
+    if (SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &val, 0))
+	return (val != WHEEL_PAGESCROLL) ? (long)val : -1;
+    return 3; // Safe default;
+}
+
+    static long
+mouse_horizontal_scroll_step(void)
+{
+    UINT val;
+    if (SystemParametersInfo(SPI_GETWHEELSCROLLCHARS, 0, &val, 0))
+	return (long)val;
+    return 3; // Safe default;
+}
+
     static void
 init_mouse_wheel(void)
 {
-    // Reasonable default values.
-    mouse_scroll_lines = 3;
-    mouse_scroll_chars = 3;
-
-    // if NT 4.0+ (or Win98) get scroll lines directly from system
-    SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &mouse_scroll_lines, 0);
-    SystemParametersInfo(SPI_GETWHEELSCROLLCHARS, 0, &mouse_scroll_chars, 0);
+    // Get the default values for the horizontal and vertical scroll steps from
+    // the system.
+    mouse_set_vert_scroll_step(mouse_vertical_scroll_step());
+    mouse_set_hor_scroll_step(mouse_horizontal_scroll_step());
 }
 
-
 /*
- * Intellimouse wheel handler.
- * Treat a mouse wheel event as if it were a scroll request.
+ * Mouse scroll event handler.
  */
     static void
-_OnMouseWheel(HWND hwnd, short zDelta, LPARAM param, int horizontal)
+_OnMouseWheel(HWND hwnd, WPARAM wParam, LPARAM lParam, int horizontal)
 {
-    int		i;
-    int		amount;
     int		button;
     win_T	*wp;
     int		modifiers, kbd_modifiers;
-
-    // Initializes mouse_scroll_chars too.
-    if (mouse_scroll_lines == 0)
-	init_mouse_wheel();
+    int		zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+    POINT	pt;
 
     wp = gui_mouse_window(FIND_POPUP);
 
@@ -4185,23 +4195,9 @@ _OnMouseWheel(HWND hwnd, short zDelta, LPARAM param, int horizontal)
     // Translate the scroll event into an event that Vim can process so that
     // the user has a chance to map the scrollwheel buttons.
     if (horizontal)
-    {
 	button = zDelta >= 0 ? MOUSE_6 : MOUSE_7;
-	if (mouse_scroll_chars > 0
-			       && mouse_scroll_chars < MAX(wp->w_width - 2, 1))
-	    amount = mouse_scroll_chars;
-	else
-	    amount = MAX(wp->w_width - 2, 1);
-    }
     else
-    {
 	button = zDelta >= 0 ? MOUSE_4 : MOUSE_5;
-	if (mouse_scroll_lines > 0
-			      && mouse_scroll_lines < MAX(wp->w_height - 2, 1))
-	    amount = mouse_scroll_lines;
-	else
-	    amount = MAX(wp->w_height - 2, 1);
-    }
 
     kbd_modifiers = get_active_modifiers();
 
@@ -4212,12 +4208,12 @@ _OnMouseWheel(HWND hwnd, short zDelta, LPARAM param, int horizontal)
     if ((kbd_modifiers & MOD_MASK_ALT) != 0)
 	modifiers |= MOUSE_ALT;
 
-    mch_disable_flush();
-    for (i = amount; i > 0; --i)
-	gui_send_mouse_event(button, GET_X_LPARAM(param), GET_Y_LPARAM(param),
-		FALSE, kbd_modifiers);
-    mch_enable_flush();
-    gui_may_flush();
+    // The cursor position is relative to the upper-left corner of the screen.
+    pt.x = GET_X_LPARAM(lParam);
+    pt.y = GET_Y_LPARAM(lParam);
+    ScreenToClient(s_textArea, &pt);
+
+    gui_send_mouse_event(button, pt.x, pt.y, FALSE, kbd_modifiers);
 }
 
 #ifdef USE_SYSMENU_FONT
@@ -4296,12 +4292,10 @@ _OnSettingChange(UINT param)
     switch (param)
     {
 	case SPI_SETWHEELSCROLLLINES:
-	    SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0,
-		    &mouse_scroll_lines, 0);
+	    mouse_set_vert_scroll_step(mouse_vertical_scroll_step());
 	    break;
-	case SPI_GETWHEELSCROLLCHARS:
-	    SystemParametersInfo(SPI_GETWHEELSCROLLCHARS, 0,
-		    &mouse_scroll_chars, 0);
+	case SPI_SETWHEELSCROLLCHARS:
+	    mouse_set_hor_scroll_step(mouse_horizontal_scroll_step());
 	    break;
 	case SPI_SETNONCLIENTMETRICS:
 	    set_tabline_font();
@@ -4608,7 +4602,7 @@ _OnMenuSelect(HWND hwnd, WPARAM wParam, LPARAM lParam)
     if (((UINT) HIWORD(wParam)
 		& (0xffff ^ (MF_MOUSESELECT + MF_BITMAP + MF_POPUP)))
 	    == MF_HILITE
-	    && (State & CMDLINE) == 0)
+	    && (State & MODE_CMDLINE) == 0)
     {
 	UINT	    idButton;
 	vimmenu_T   *pMenu;
@@ -4671,8 +4665,8 @@ _WndProc(
     WPARAM wParam,
     LPARAM lParam)
 {
-    // TRACE("WndProc: hwnd = %08x, msg = %x, wParam = %x, lParam = %x\n",
-    //       hwnd, uMsg, wParam, lParam);
+    // ch_log(NULL, "WndProc: hwnd = %08x, msg = %x, wParam = %x, lParam = %x",
+	    // hwnd, uMsg, wParam, lParam);
 
     HandleMouseHide(uMsg, lParam);
 
@@ -4771,7 +4765,7 @@ _WndProc(
 
     case WM_MOUSEWHEEL:
     case WM_MOUSEHWHEEL:
-	_OnMouseWheel(hwnd, HIWORD(wParam), lParam, uMsg == WM_MOUSEHWHEEL);
+	_OnMouseWheel(hwnd, wParam, lParam, uMsg == WM_MOUSEHWHEEL);
 	return 0L;
 
 	// Notification for change in SystemParametersInfo()
@@ -5598,8 +5592,8 @@ _OnImeNotify(HWND hWnd, DWORD dwCommand, DWORD dwData UNUSED)
 		im_set_position(gui.row, gui.col);
 
 		// Disable langmap
-		State &= ~LANGMAP;
-		if (State & INSERT)
+		State &= ~MODE_LANGMAP;
+		if (State & MODE_INSERT)
 		{
 # if defined(FEAT_KEYMAP)
 		    // Unshown 'keymap' in status lines
